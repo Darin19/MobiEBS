@@ -1,0 +1,11 @@
+{
+    "schema_version": 2,
+    "commit": "HEAD",
+    "indexed_at": "2026-09-10T02:21:33Z",
+    "project": "MobiEBS",
+    "nodes": 197,
+    "edges": 920,
+    "original_size": 2555904,
+    "compressed_size": 312670,
+    "compression_level": 9
+}
