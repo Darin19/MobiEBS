@@ -1,8 +1,9 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { seedDemoState } from './seed'
+import { canManageScope as hasScopeAdminAccess, canMutateAsset as hasAssetMutationAccess, canViewAsset as hasAssetViewAccess, isScopeActive } from './scope-permissions'
 import { supabase, supabaseConfigured } from './supabase'
-import type { Approval, AuditLog, BaseEntity, Connector, DemoState, EntityCollection, Pipeline, Role, RuntimeEvent, RuntimeRun } from './types'
+import type { Approval, AuditLog, BaseEntity, Connector, DemoState, EntityCollection, Pipeline, Role, RuntimeEvent, RuntimeRun, ScopeChangeRequest, ScopeChangeRequestStatus, StewardshipAssignment } from './types'
 
 type Toast = { id: string; tone: 'success' | 'error' | 'info'; title: string; detail?: string }
 type UpsertAction = { type: 'upsert'; collection: EntityCollection; entity: BaseEntity }
@@ -10,24 +11,52 @@ type RemoveAction = { type: 'remove'; collection: EntityCollection; id: string }
 type ResetAction = { type: 'reset'; state: DemoState }
 type Action = UpsertAction | RemoveAction | ResetAction
 
-const STORAGE_KEY = 'mobiesb-demo-state-v1'
+const STORAGE_KEY = 'mobiesb-demo-state-v2'
 
 const tableNames: Record<EntityCollection, string> = {
-  organizations: 'organizations', systems: 'systems', systemEnvironments: 'system_environments', connectors: 'connectors', connectorTests: 'connector_tests', dataAssets: 'data_assets', assetFields: 'asset_fields', schemaSnapshots: 'schema_snapshots', pipelines: 'pipelines', pipelineMappings: 'pipeline_mappings', dqRules: 'dq_rules', dqRuns: 'dq_runs', policies: 'policies', policyFields: 'policy_fields', approvals: 'approvals', dataProducts: 'data_products', productVersions: 'product_versions', channels: 'channels', consumers: 'consumers', grants: 'grants', runtimeRuns: 'runtime_runs', runtimeEvents: 'runtime_events', alerts: 'alerts', auditLogs: 'audit_logs',
+  organizations: 'organizations', dataDomains: 'data_domains', systems: 'systems', systemEnvironments: 'system_environments', connectors: 'connectors', connectorTests: 'connector_tests', dataAssets: 'data_assets', governanceScopes: 'governance_scopes', stewardshipAssignments: 'stewardship_assignments', scopeChangeRequests: 'scope_change_requests', userOrganizationRoles: 'user_organization_roles', governanceNotifications: 'governance_notifications', assetFields: 'asset_fields', schemaSnapshots: 'schema_snapshots', pipelines: 'pipelines', pipelineMappings: 'pipeline_mappings', dqRules: 'dq_rules', dqRuns: 'dq_runs', policies: 'policies', policyFields: 'policy_fields', approvals: 'approvals', dataProducts: 'data_products', productVersions: 'product_versions', channels: 'channels', consumers: 'consumers', grants: 'grants', runtimeRuns: 'runtime_runs', runtimeEvents: 'runtime_events', alerts: 'alerts', auditLogs: 'audit_logs',
 }
 
 const rolePermissions: Record<Role, string[]> = {
-  'Admin tích hợp': ['organizations', 'systems', 'systemEnvironments', 'connectors', 'dataAssets', 'pipelines', 'channels', 'consumers', 'grants', 'runtimeRuns'],
-  'Data Steward': ['dataAssets', 'assetFields', 'policies', 'dqRules', 'dqRuns', 'dataProducts', 'productVersions', 'channels', 'grants'],
+  'Admin tích hợp': ['organizations', 'dataDomains', 'systems', 'systemEnvironments', 'connectors', 'dataAssets', 'governanceScopes', 'stewardshipAssignments', 'scopeChangeRequests', 'userOrganizationRoles', 'governanceNotifications', 'pipelines', 'channels', 'consumers', 'grants', 'runtimeRuns'],
+  'Data Steward': ['assetFields', 'policies', 'dqRules', 'dqRuns', 'dataProducts', 'productVersions', 'channels', 'grants', 'scopeChangeRequests', 'governanceNotifications'],
   'Data Owner / Reviewer': ['approvals', 'policies', 'dataProducts', 'grants'],
   Ops: ['runtimeRuns', 'runtimeEvents', 'alerts', 'connectors'],
   Auditor: [],
 }
 
+const demoActors: Record<Role, { id: string; name: string }> = {
+  'Admin tích hợp': { id: '00000000-0000-4000-8000-000000000001', name: 'Nguyễn Minh Anh' },
+  'Data Steward': { id: '00000000-0000-4000-8000-000000000007', name: 'Phạm Quốc Minh' },
+  'Data Owner / Reviewer': { id: '00000000-0000-4000-8000-000000000002', name: 'Nguyễn Văn A' },
+  Ops: { id: '00000000-0000-4000-8000-000000000010', name: 'Ngọc Trần' },
+  Auditor: { id: '00000000-0000-4000-8000-000000000011', name: 'Lê Thanh Bình' },
+}
+
+const userDirectory: Record<string, string> = {
+  '00000000-0000-4000-8000-000000000001': 'Nguyễn Minh Anh',
+  '00000000-0000-4000-8000-000000000002': 'Nguyễn Văn A',
+  '00000000-0000-4000-8000-000000000003': 'Nguyễn Minh Anh',
+  '00000000-0000-4000-8000-000000000004': 'Nguyễn Văn A',
+  '00000000-0000-4000-8000-000000000005': 'Lê Thu Hà',
+  '00000000-0000-4000-8000-000000000006': 'Nguyễn Văn A',
+  '00000000-0000-4000-8000-000000000007': 'Phạm Quốc Minh',
+  '00000000-0000-4000-8000-000000000008': 'Nguyễn Văn A',
+  '00000000-0000-4000-8000-000000000009': 'Đỗ Việt Long',
+  '00000000-0000-4000-8000-000000000010': 'Ngọc Trần',
+  '00000000-0000-4000-8000-000000000011': 'Lê Thanh Bình',
+}
+
 const loadState = (): DemoState => {
   try {
     const saved = localStorage.getItem(STORAGE_KEY)
-    return saved ? JSON.parse(saved) as DemoState : seedDemoState()
+    if (!saved) return seedDemoState()
+    const parsed = JSON.parse(saved) as Partial<DemoState>
+    return Array.isArray(parsed.governanceScopes)
+      && Array.isArray(parsed.stewardshipAssignments)
+      && Array.isArray(parsed.userOrganizationRoles)
+      ? parsed as DemoState
+      : seedDemoState()
   } catch {
     return seedDemoState()
   }
@@ -65,10 +94,16 @@ type DemoContextValue = {
   state: DemoState
   role: Role
   setRole: (role: Role) => void
+  currentUserId: string
+  currentUserName: string
+  getUserName: (userId?: string) => string
   toasts: Toast[]
   dismissToast: (toastId: string) => void
   notify: (tone: Toast['tone'], title: string, detail?: string) => void
   canMutate: (collection: EntityCollection) => boolean
+  canManageScope: () => boolean
+  canViewAsset: (assetId: string) => boolean
+  canMutateAsset: (assetId: string) => boolean
   create: <T extends BaseEntity = BaseEntity>(collection: EntityCollection, partial: Record<string, any>, label?: string) => Promise<T>
   update: <T extends BaseEntity>(collection: EntityCollection, entity: T, patch: Partial<T>, label?: string) => Promise<T>
   remove: (collection: EntityCollection, entity: BaseEntity, label?: string) => Promise<void>
@@ -78,9 +113,12 @@ type DemoContextValue = {
   runDq: (assetId: string) => Promise<void>
   submitApproval: (approval: Omit<Approval, keyof BaseEntity>) => Promise<void>
   decideApproval: (approval: Approval, decision: 'Approved' | 'Rejected' | 'Changes Requested', comment?: string) => Promise<void>
+  acceptStewardship: (assignment: StewardshipAssignment, accepted: boolean, reason?: string) => Promise<void>
+  submitScopeChangeRequest: (request: Omit<ScopeChangeRequest, keyof BaseEntity | 'requestedBy' | 'status'>) => Promise<void>
+  reviewScopeChangeRequest: (request: ScopeChangeRequest, decision: Exclude<ScopeChangeRequestStatus, 'Draft' | 'Pending Approval' | 'Cancelled'>, comment?: string) => Promise<void>
   simulateConsumerRequest: (dataProductId: string, consumerName: string) => Promise<void>
   supabaseConfigured: boolean
-  supabaseStatus: 'local' | 'connecting' | 'connected' | 'degraded'
+  supabaseStatus: 'local' | 'connecting' | 'connected' | 'auth_required' | 'degraded'
 }
 
 const DemoContext = createContext<DemoContextValue | null>(null)
@@ -89,6 +127,40 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
   const [state, dispatch] = useReducer(reducer, undefined, loadState)
   const [role, setRole] = useState<Role>('Admin tích hợp')
   const [toasts, setToasts] = useState<Toast[]>([])
+  const [authUser, setAuthUser] = useState<{ id: string; email?: string }>()
+  const currentUser = useMemo(() => authUser ? { id: authUser.id, name: authUser.email ?? `Supabase user ${authUser.id.slice(0, 8)}` } : demoActors[role], [authUser, role])
+
+  const getUserName = useCallback((userId?: string) => {
+    if (!userId) return 'Chưa gán'
+    return userDirectory[userId] ?? `Người dùng ${userId.slice(0, 8)}`
+  }, [])
+
+  const canManageScope = useCallback(() => hasScopeAdminAccess({
+    userId: currentUser.id,
+    userOrganizationRoles: state.userOrganizationRoles,
+  }), [currentUser.id, state.userOrganizationRoles])
+
+  const canViewAsset = useCallback((assetId: string) => {
+    const asset = state.dataAssets.find((item) => item.id === assetId)
+    return Boolean(asset && hasAssetViewAccess({
+      userId: currentUser.id,
+      asset,
+      userOrganizationRoles: state.userOrganizationRoles,
+      scopes: state.governanceScopes,
+      assignments: state.stewardshipAssignments,
+    }))
+  }, [currentUser.id, state.dataAssets, state.governanceScopes, state.stewardshipAssignments, state.userOrganizationRoles])
+
+  const canMutateAsset = useCallback((assetId: string) => {
+    const asset = state.dataAssets.find((item) => item.id === assetId)
+    return Boolean(asset && hasAssetMutationAccess({
+      userId: currentUser.id,
+      asset,
+      userOrganizationRoles: state.userOrganizationRoles,
+      scopes: state.governanceScopes,
+      assignments: state.stewardshipAssignments,
+    }))
+  }, [currentUser.id, state.dataAssets, state.governanceScopes, state.stewardshipAssignments, state.userOrganizationRoles])
 
   const supabaseProbe = useQuery({
     queryKey: ['mobiesb', 'supabase-probe'],
@@ -103,7 +175,22 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
       return response.data
     },
   })
-  const [supabaseStatus, setSupabaseStatus] = useState<'local' | 'connecting' | 'connected' | 'degraded'>(supabaseConfigured ? 'connecting' : 'local')
+  const [supabaseStatus, setSupabaseStatus] = useState<'local' | 'connecting' | 'connected' | 'auth_required' | 'degraded'>(supabaseConfigured ? 'connecting' : 'local')
+
+  useEffect(() => {
+    if (!supabase) return
+    let active = true
+    void supabase.auth.getSession().then(({ data }) => {
+      if (!active) return
+      const user = data.session?.user
+      setAuthUser(user ? { id: user.id, email: user.email } : undefined)
+    })
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+      const user = session?.user
+      setAuthUser(user ? { id: user.id, email: user.email } : undefined)
+    })
+    return () => { active = false; listener.subscription.unsubscribe() }
+  }, [])
 
   useEffect(() => { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)) }, [state])
 
@@ -145,8 +232,9 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
       if (!active) return
       const failures = result.filter(({ response }) => response.error)
       if (failures.length) {
-        setSupabaseStatus('degraded')
-        notify('info', 'Đang dùng dữ liệu demo cục bộ', 'Supabase chưa có schema/seed hoặc Data API chưa expose bảng. Chạy migration và seed rồi refresh.')
+        const scopeError = failures.some(({ response }) => response.error?.code === '42501' || response.error?.message.includes('permission denied'))
+        setSupabaseStatus(scopeError ? 'auth_required' : 'degraded')
+        notify('info', 'Đang dùng dữ liệu demo cục bộ', scopeError ? 'Supabase yêu cầu phiên Auth đã được gán Organization Role và Governance Scope.' : 'Không thể đọc đầy đủ dữ liệu Supabase. Kiểm tra schema, Data API và kết nối.')
         return
       }
       const total = result.reduce((sum, item) => sum + (item.response.data?.length ?? 0), 0)
@@ -154,15 +242,16 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
       dispatch({ type: 'reset', state: remote })
       setSupabaseStatus('connected')
       notify('success', 'Đã nạp dữ liệu từ Supabase', `${total} bản ghi được đồng bộ vào demo.`)
-      } catch {
+      } catch (error) {
         if (!active) return
-        setSupabaseStatus('degraded')
-        notify('info', 'Đang dùng dữ liệu demo cục bộ', 'Không thể kết nối Data API. Chạy migration/seed và kiểm tra Data API exposure rồi refresh.')
+        const scopeError = error instanceof Error && error.message.includes('permission denied')
+        setSupabaseStatus(scopeError ? 'auth_required' : 'degraded')
+        notify('info', 'Đang dùng dữ liệu demo cục bộ', scopeError ? 'Supabase yêu cầu phiên Auth đã được gán Scope.' : 'Không thể kết nối Data API. Kiểm tra kết nối và cấu hình Supabase.')
       }
     }
     void hydrate()
     return () => { active = false }
-  }, [notify])
+  }, [authUser?.id, notify])
 
   const sync = useCallback(async (collection: EntityCollection, entity: BaseEntity, operation: 'upsert' | 'delete') => {
     if (!supabase) return
@@ -177,33 +266,89 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
     setSupabaseStatus('connected')
   }, [])
 
+  const assetIdForMutation = useCallback((collection: EntityCollection, entity: Record<string, unknown>) => {
+    if (collection === 'dataAssets') return String(entity.id ?? '') || undefined
+    if (collection === 'assetFields' || collection === 'dqRules' || collection === 'dqRuns' || collection === 'policies' || collection === 'dataProducts') return typeof entity.assetId === 'string' ? entity.assetId : undefined
+    if (collection === 'policyFields') {
+      const policy = state.policies.find((item) => item.id === entity.policyId)
+      return policy?.assetId
+    }
+    return undefined
+  }, [state.policies])
+
+  const assertMutationAllowed = useCallback((collection: EntityCollection, entity: Record<string, unknown>, operation: 'create' | 'update' | 'remove') => {
+    if (collection === 'auditLogs' || collection === 'governanceNotifications') return
+
+    if (collection === 'governanceScopes' || collection === 'userOrganizationRoles') {
+      if (!canManageScope()) throw new Error('Chỉ Admin tích hợp được phép thay đổi cấu trúc Governance Scope.')
+      return
+    }
+
+    if (collection === 'stewardshipAssignments') {
+      const isOwnAcceptance = entity.userId === currentUser.id
+        && ['Active', 'Accepted', 'Rejected'].includes(String(entity.status))
+      if (!canManageScope() && !(operation === 'update' && isOwnAcceptance)) throw new Error('Chỉ Admin tích hợp có thể gán hoặc chuyển Stewardship.')
+      return
+    }
+
+    if (collection === 'scopeChangeRequests') {
+      const scope = state.governanceScopes.find((item) => item.id === entity.scopeId)
+      const ownsActiveScope = Boolean(scope && state.stewardshipAssignments.some((assignment) => assignment.scopeId === scope.id && assignment.userId === currentUser.id && assignment.status === 'Active' && isScopeActive(scope)))
+      const isOwnRequest = entity.requestedBy === currentUser.id && ['Draft', 'Pending Approval', 'Cancelled'].includes(String(entity.status))
+      if (!canManageScope() && !(ownsActiveScope && (operation === 'create' || isOwnRequest))) throw new Error('Bạn chỉ có thể tạo hoặc cập nhật request cho scope Active của mình.')
+      return
+    }
+
+    const assetId = assetIdForMutation(collection, entity)
+    if (assetId) {
+      const existingAsset = state.dataAssets.find((asset) => asset.id === assetId)
+      if (!existingAsset && collection === 'dataAssets' && canManageScope()) return
+      if (!canMutateAsset(assetId)) throw new Error('Bạn không có quyền thay đổi dữ liệu governance của Asset ngoài scope Active.')
+      const changesAssetStructure = collection === 'dataAssets' && existingAsset !== undefined && (
+        existingAsset.owningOrganizationId !== entity.owningOrganizationId
+        || existingAsset.custodianOrganizationId !== entity.custodianOrganizationId
+        || existingAsset.domainId !== entity.domainId
+      )
+      if (changesAssetStructure && !canManageScope()) {
+        throw new Error('Chỉ Admin tích hợp có thể đổi Organization hoặc Data Domain của Asset.')
+      }
+      return
+    }
+
+    if (!rolePermissions[role].includes(collection) && !canManageScope()) throw new Error('Vai trò hiện tại không có quyền thay đổi dữ liệu này.')
+  }, [assetIdForMutation, canManageScope, canMutateAsset, currentUser.id, role, state.dataAssets, state.governanceScopes, state.stewardshipAssignments])
+
   const audit = useCallback(async (action: string, entityType: string, entityId: string, before?: Record<string, unknown>, after?: Record<string, unknown>) => {
-    const entry: AuditLog = { id: id(), createdAt: now(), updatedAt: now(), actor: 'Nguyễn Minh Anh', role, action, entityType, entityId, before, after }
+    const organizationId = String(after?.organizationId ?? after?.owningOrganizationId ?? before?.organizationId ?? before?.owningOrganizationId ?? '') || undefined
+    const entry: AuditLog = { id: id(), createdAt: now(), updatedAt: now(), actor: currentUser.name, actorUserId: currentUser.id, role, organizationId, action, entityType, entityId, before, after }
     dispatch({ type: 'upsert', collection: 'auditLogs', entity: entry })
     try { await sync('auditLogs', entry, 'upsert') } catch { /* The primary mutation remains usable in local mode. */ }
-  }, [role, sync])
+  }, [currentUser, role, sync])
 
   const create = useCallback(async <T extends BaseEntity = BaseEntity>(collection: EntityCollection, partial: Record<string, any>, label = 'Tạo bản ghi') => {
     const entity = { ...partial, id: partial.id ?? id(), createdAt: partial.createdAt ?? now(), updatedAt: now() } as T
+    assertMutationAllowed(collection, entity as unknown as Record<string, unknown>, 'create')
     dispatch({ type: 'upsert', collection, entity })
     try { await sync(collection, entity, 'upsert'); notify('success', `${label} thành công`, supabaseConfigured ? 'Đã đồng bộ Supabase.' : 'Đang lưu trong demo cục bộ.') } catch (error) { notify('error', `${label} đã lưu cục bộ`, error instanceof Error ? error.message : 'Không thể đồng bộ Supabase.') }
     if (collection !== 'auditLogs') void audit(label, collection, entity.id, undefined, entity as unknown as Record<string, unknown>)
     return entity
-  }, [audit, notify, sync])
+  }, [assertMutationAllowed, audit, notify, sync])
 
   const update = useCallback(async <T extends BaseEntity>(collection: EntityCollection, entity: T, patch: Partial<T>, label = 'Cập nhật bản ghi') => {
     const next = { ...entity, ...patch, updatedAt: now() } as T
+    assertMutationAllowed(collection, next as unknown as Record<string, unknown>, 'update')
     dispatch({ type: 'upsert', collection, entity: next })
     try { await sync(collection, next, 'upsert'); notify('success', `${label} thành công`, supabaseConfigured ? 'Đã đồng bộ Supabase.' : 'Đang lưu trong demo cục bộ.') } catch (error) { notify('error', `${label} đã lưu cục bộ`, error instanceof Error ? error.message : 'Không thể đồng bộ Supabase.') }
     if (collection !== 'auditLogs') void audit(label, collection, entity.id, entity as unknown as Record<string, unknown>, next as unknown as Record<string, unknown>)
     return next
-  }, [audit, notify, sync])
+  }, [assertMutationAllowed, audit, notify, sync])
 
   const remove = useCallback(async (collection: EntityCollection, entity: BaseEntity, label = 'Xóa bản ghi') => {
+    assertMutationAllowed(collection, entity as unknown as Record<string, unknown>, 'remove')
     dispatch({ type: 'remove', collection, id: entity.id })
     try { await sync(collection, entity, 'delete'); notify('success', `${label} thành công`, supabaseConfigured ? 'Đã đồng bộ Supabase.' : 'Đang lưu trong demo cục bộ.') } catch (error) { notify('error', `${label} đã xóa cục bộ`, error instanceof Error ? error.message : 'Không thể đồng bộ Supabase.') }
     if (collection !== 'auditLogs') void audit(label, collection, entity.id, entity as unknown as Record<string, unknown>)
-  }, [audit, notify, sync])
+  }, [assertMutationAllowed, audit, notify, sync])
 
   const testConnector = useCallback(async (connector: Connector) => {
     const successful = Math.random() < 0.87
@@ -244,6 +389,84 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
     }
   }, [state.policies, update])
 
+  const acceptStewardship = useCallback(async (assignment: StewardshipAssignment, accepted: boolean, reason?: string) => {
+    if (assignment.userId !== currentUser.id) {
+      notify('error', 'Không thể xác nhận assignment', 'Chỉ Data Steward được chỉ định mới có thể nhận hoặc từ chối stewardship.')
+      return
+    }
+    const status = accepted ? 'Active' : 'Rejected'
+    await update('stewardshipAssignments', assignment, { status, acceptedAt: accepted ? now() : undefined, reason: reason ?? assignment.reason }, accepted ? 'Xác nhận nhận stewardship' : 'Từ chối stewardship')
+    const scope = state.governanceScopes.find((item) => item.id === assignment.scopeId)
+    await create('governanceNotifications', {
+      userId: assignment.assignedBy,
+      organizationId: scope?.organizationId,
+      type: 'REQUEST_DECIDED',
+      title: accepted ? 'Steward đã nhận phạm vi' : 'Steward từ chối phạm vi',
+      detail: `${currentUser.name} ${accepted ? 'đã xác nhận' : 'đã từ chối'} stewardship.`,
+      entityType: 'StewardshipAssignment',
+      entityId: assignment.id,
+    }, 'Gửi thông báo stewardship')
+  }, [create, currentUser, notify, state.governanceScopes, update])
+
+  const submitScopeChangeRequest = useCallback(async (request: Omit<ScopeChangeRequest, keyof BaseEntity | 'requestedBy' | 'status'>) => {
+    const scope = request.scopeId ? state.governanceScopes.find((item) => item.id === request.scopeId) : undefined
+    const ownsScope = Boolean(scope && state.stewardshipAssignments.some((assignment) => assignment.scopeId === scope.id && assignment.userId === currentUser.id && assignment.status === 'Active' && isScopeActive(scope)))
+    if (!canManageScope() && !ownsScope) {
+      notify('error', 'Không thể gửi yêu cầu', 'Bạn chỉ có thể đề xuất thay đổi cho scope Active của mình.')
+      return
+    }
+    await create('scopeChangeRequests', { ...request, requestedBy: currentUser.id, status: 'Pending Approval' }, 'Gửi yêu cầu thay đổi scope')
+  }, [canManageScope, create, currentUser.id, notify, state.governanceScopes, state.stewardshipAssignments])
+
+  const reviewScopeChangeRequest = useCallback(async (request: ScopeChangeRequest, decision: Exclude<ScopeChangeRequestStatus, 'Draft' | 'Pending Approval' | 'Cancelled'>, comment?: string) => {
+    if (!canManageScope()) {
+      notify('error', 'Không có quyền duyệt', 'Chỉ Admin tích hợp có thể duyệt Scope Change Request.')
+      return
+    }
+    await update('scopeChangeRequests', request, { status: decision, reviewerId: currentUser.id, reviewerComment: comment, reviewedAt: now() }, decision === 'Approved' ? 'Phê duyệt Scope Change Request' : 'Cập nhật Scope Change Request')
+    if (decision !== 'Approved' || !request.scopeId) return
+
+    const scope = state.governanceScopes.find((item) => item.id === request.scopeId)
+    if (!scope) return
+    if (request.requestType === 'PAUSE_SCOPE') await update('governanceScopes', scope, { status: 'Paused' }, 'Tạm dừng scope')
+    if (request.requestType === 'REACTIVATE_SCOPE') await update('governanceScopes', scope, { status: 'Active' }, 'Kích hoạt lại scope')
+    if (request.requestType === 'REMOVE_ASSET' && scope.scopeType === 'Asset') await update('governanceScopes', scope, { status: 'Revoked' }, 'Thu hồi asset khỏi scope')
+
+    if (request.requestType === 'TRANSFER_STEWARD' && request.targetUserId) {
+      const currentPrimary = state.stewardshipAssignments.find((assignment) => assignment.scopeId === scope.id && assignment.assignmentRole === 'DataSteward' && assignment.isPrimary && assignment.status === 'Active')
+      if (currentPrimary) await update('stewardshipAssignments', currentPrimary, { status: 'Ended', validTo: new Date().toISOString().slice(0, 10) }, 'Kết thúc stewardship cũ')
+      await create('stewardshipAssignments', {
+        scopeId: scope.id,
+        assignmentRole: 'DataSteward',
+        userId: request.targetUserId,
+        assignedBy: currentUser.id,
+        assignedAt: now(),
+        validFrom: new Date().toISOString().slice(0, 10),
+        validTo: scope.validTo,
+        status: 'Awaiting Acceptance',
+        isPrimary: true,
+        reason: request.reason,
+      }, 'Chuyển giao stewardship')
+    }
+
+    if ((request.requestType === 'ADD_ASSET' || request.requestType === 'EXPAND_DOMAIN') && request.targetAssetId) {
+      const asset = state.dataAssets.find((item) => item.id === request.targetAssetId)
+      if (asset && !state.governanceScopes.some((item) => item.scopeType === 'Asset' && item.assetId === asset.id && item.status !== 'Revoked')) {
+        const newScope = await create('governanceScopes', {
+          organizationId: asset.owningOrganizationId,
+          scopeType: 'Asset',
+          assetId: asset.id,
+          status: 'Active',
+          validFrom: new Date().toISOString().slice(0, 10),
+          validTo: scope.validTo,
+          createdBy: currentUser.id,
+        }, 'Thêm asset vào scope')
+        const currentSteward = state.stewardshipAssignments.find((assignment) => assignment.scopeId === scope.id && assignment.assignmentRole === 'DataSteward' && assignment.status === 'Active')
+        if (currentSteward) await create('stewardshipAssignments', { ...currentSteward, id: undefined, scopeId: newScope.id, assignedBy: currentUser.id, assignedAt: now() }, 'Gán Steward cho asset mới')
+      }
+    }
+  }, [canManageScope, create, currentUser.id, notify, state.dataAssets, state.governanceScopes, state.stewardshipAssignments, update])
+
   const simulateConsumerRequest = useCallback(async (dataProductId: string, consumerName: string) => {
     const product = state.dataProducts.find((item) => item.id === dataProductId)
     if (!product) return
@@ -252,11 +475,12 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
   }, [create, state.dataProducts])
 
   const value = useMemo<DemoContextValue>(() => ({
-    state, role, setRole, toasts, dismissToast, notify,
+    state, role, setRole, currentUserId: currentUser.id, currentUserName: currentUser.name, getUserName, toasts, dismissToast, notify,
     canMutate: (collection) => rolePermissions[role].includes(collection),
+    canManageScope, canViewAsset, canMutateAsset,
     create, update, remove, resetDemo: () => { const fresh = seedDemoState(); dispatch({ type: 'reset', state: fresh }); notify('info', 'Đã khôi phục dữ liệu demo', 'Các thay đổi local đã được thay thế bởi seed data.') },
-    testConnector, runPipeline, runDq, submitApproval, decideApproval, simulateConsumerRequest, supabaseConfigured, supabaseStatus,
-  }), [create, decideApproval, dismissToast, notify, remove, role, runDq, runPipeline, simulateConsumerRequest, state, submitApproval, supabaseStatus, testConnector, toasts, update])
+    testConnector, runPipeline, runDq, submitApproval, decideApproval, acceptStewardship, submitScopeChangeRequest, reviewScopeChangeRequest, simulateConsumerRequest, supabaseConfigured, supabaseStatus,
+  }), [acceptStewardship, canManageScope, canMutateAsset, canViewAsset, create, currentUser, decideApproval, dismissToast, getUserName, notify, remove, reviewScopeChangeRequest, role, runDq, runPipeline, simulateConsumerRequest, state, submitApproval, submitScopeChangeRequest, supabaseStatus, testConnector, toasts, update])
 
   return <DemoContext.Provider value={value}>{children}</DemoContext.Provider>
 }

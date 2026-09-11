@@ -3,10 +3,17 @@ export type Role = 'Admin tích hợp' | 'Data Steward' | 'Data Owner / Reviewer
 export type EntityStatus =
   | 'Draft'
   | 'Active'
+  | 'Inactive'
   | 'Paused'
   | 'Deprecated'
   | 'Pending Approval'
   | 'Approved'
+  | 'Rejected'
+  | 'Changes Requested'
+  | 'Cancelled'
+  | 'Awaiting Acceptance'
+  | 'Accepted'
+  | 'Ended'
   | 'Published'
   | 'Failed'
   | 'Success'
@@ -83,6 +90,9 @@ export interface ConnectorTest extends BaseEntity {
 
 export interface DataAsset extends BaseEntity {
   connectorId?: string
+  owningOrganizationId: string
+  custodianOrganizationId?: string
+  domainId?: string
   code: string
   name: string
   role: 'Source' | 'Target' | 'Both'
@@ -93,7 +103,82 @@ export interface DataAsset extends BaseEntity {
   classification: 'Public' | 'Internal' | 'Restricted' | 'Sensitive' | 'Personal Data'
   status: EntityStatus
   dqScore: number
+  governanceStatus: 'Complete' | 'Incomplete' | 'Review Required'
   description?: string
+}
+
+export interface DataDomain extends BaseEntity {
+  organizationId: string
+  code: string
+  name: string
+  description?: string
+  ownerUserId?: string
+  status: EntityStatus
+}
+
+export type GovernanceScopeType = 'Organization' | 'Domain' | 'Asset'
+export type StewardshipAssignmentRole = 'DataOwner' | 'DataSteward' | 'DelegateSteward'
+export type ScopeChangeRequestType = 'ADD_ASSET' | 'REMOVE_ASSET' | 'TRANSFER_STEWARD' | 'CHANGE_OWNER' | 'EXPAND_DOMAIN' | 'REDUCE_DOMAIN' | 'PAUSE_SCOPE' | 'REACTIVATE_SCOPE'
+export type ScopeChangeRequestStatus = 'Draft' | 'Pending Approval' | 'Approved' | 'Rejected' | 'Changes Requested' | 'Cancelled'
+export type UserOrganizationRoleName = 'IntegrationAdmin' | 'DataOwner' | 'DataSteward' | 'DelegateSteward' | 'OrganizationViewer'
+
+export interface GovernanceScope extends BaseEntity {
+  organizationId: string
+  scopeType: GovernanceScopeType
+  domainId?: string
+  assetId?: string
+  status: 'Draft' | 'Active' | 'Paused' | 'Expired' | 'Revoked'
+  validFrom: string
+  validTo?: string
+  createdBy: string
+}
+
+export interface StewardshipAssignment extends BaseEntity {
+  scopeId: string
+  assignmentRole: StewardshipAssignmentRole
+  userId: string
+  assignedBy: string
+  assignedAt: string
+  acceptedAt?: string
+  validFrom: string
+  validTo?: string
+  status: 'Assigned' | 'Awaiting Acceptance' | 'Accepted' | 'Active' | 'Rejected' | 'Ended' | 'Revoked' | 'Expired'
+  isPrimary: boolean
+  reason?: string
+}
+
+export interface ScopeChangeRequest extends BaseEntity {
+  scopeId?: string
+  requestType: ScopeChangeRequestType
+  requestedBy: string
+  targetUserId?: string
+  targetAssetId?: string
+  targetDomainId?: string
+  reason: string
+  status: ScopeChangeRequestStatus
+  reviewerId?: string
+  reviewerComment?: string
+  reviewedAt?: string
+}
+
+export interface UserOrganizationRole extends BaseEntity {
+  userId: string
+  organizationId: string
+  role: UserOrganizationRoleName
+  status: 'Active' | 'Inactive' | 'Suspended'
+  validFrom: string
+  validTo?: string
+}
+
+export interface GovernanceNotification extends BaseEntity {
+  userId: string
+  organizationId?: string
+  type: 'SCOPE_ASSIGNED' | 'SCOPE_EXPIRING' | 'REQUEST_DECIDED' | 'SCOPE_PAUSED' | 'STEWARDSHIP_TRANSFERRED' | 'SCOPE_CONFLICT'
+  title: string
+  detail?: string
+  entityType: string
+  entityId: string
+  readAt?: string
 }
 
 export interface AssetField extends BaseEntity {
@@ -280,7 +365,9 @@ export interface Alert extends BaseEntity {
 
 export interface AuditLog extends BaseEntity {
   actor: string
+  actorUserId?: string
   role: Role
+  organizationId?: string
   action: string
   entityType: string
   entityId: string
@@ -291,11 +378,17 @@ export interface AuditLog extends BaseEntity {
 
 export interface DemoState {
   organizations: Organization[]
+  dataDomains: DataDomain[]
   systems: IntegrationSystem[]
   systemEnvironments: SystemEnvironment[]
   connectors: Connector[]
   connectorTests: ConnectorTest[]
   dataAssets: DataAsset[]
+  governanceScopes: GovernanceScope[]
+  stewardshipAssignments: StewardshipAssignment[]
+  scopeChangeRequests: ScopeChangeRequest[]
+  userOrganizationRoles: UserOrganizationRole[]
+  governanceNotifications: GovernanceNotification[]
   assetFields: AssetField[]
   schemaSnapshots: SchemaSnapshot[]
   pipelines: Pipeline[]
